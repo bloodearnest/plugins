@@ -104,5 +104,5 @@ def juju_arg_parser(*args, **kwargs):
         '-d',
         '--description',
         action=ShowDesc,
-        help='Output a short description off the plugin')
+        help='Output a short description of the plugin')
     return parser
