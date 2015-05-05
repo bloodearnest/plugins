@@ -5,24 +5,14 @@ import os
 from time import sleep
 import json
 import subprocess
-import argparse
 from collections import namedtuple
 
-
-class Description(argparse.Action):
-    def __call__(self, *args, **kwargs):
-        print "Watch a juju environment for changes/error and notify user",
-        sys.exit(0)
+import utils
 
 
 def parse():
-    parser = argparse.ArgumentParser(
-        description='Track and log/notify changes in Juju ENVIRONMENT')
-    parser.add_argument(
-        '--description',
-        action=Description,
-        nargs=0,
-        help="Output a short description of the command",
+    parser = utils.juju_arg_parser(
+        description="Watch a juju environment for changes and notify user"
     )
     parser.add_argument(
         '--all',

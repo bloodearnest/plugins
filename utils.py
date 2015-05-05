@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import sys
 import subprocess
 import yaml
+import argparse
 
 
 class ServiceUnit(object):
@@ -66,7 +68,12 @@ def get_max_lens(units, align):
     return max_name_len, max_addr_len, max_stat_len
 
 
-def print_unit(unit, indent=0, quiet=False, name_width=0, addr_width=0, stat_width=0):
+def print_unit(unit,
+               indent=0,
+               quiet=False,
+               name_width=0,
+               addr_width=0,
+               stat_width=0):
     status_line = "%-*s %-*s (%*s) %s"
     if not quiet:
         status_line = "%s- " + status_line
@@ -79,3 +86,23 @@ def print_unit(unit, indent=0, quiet=False, name_width=0, addr_width=0, stat_wid
                          addr_width, unit.public_address,
                          stat_width, unit.agent_state,
                          ', '.join(unit.open_ports))
+
+
+class ShowDesc(argparse.Action):
+    """Helper for implementing --description using argparse"""
+    def __init__(self, option_strings, dest, nargs=None, **kwargs):
+        super(ShowDesc, self).__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, *args, **kwargs):
+        print(parser.description)
+        sys.exit(0)
+
+
+def juju_arg_parser(*args, **kwargs):
+    parser = argparse.ArgumentParser(*args, **kwargs)
+    parser.add_argument(
+        '-d',
+        '--description',
+        action=ShowDesc,
+        help='Output a short description off the plugin')
+    return parser

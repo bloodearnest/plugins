@@ -5,27 +5,18 @@ import os
 import sys
 import yaml
 import subprocess
-import argparse
 from datetime import datetime
 
 import jujuclient
+import utils
 
 
 JUJU_ENV = os.environ.get('JUJU_ENV', '')
 JUJU_REPOSITORY = os.environ.get('JUJU_REPOSITORY', '')
 
 
-class ShowDesc(argparse.Action):
-    def __init__(self, option_strings, dest, nargs=None, **kwargs):
-        super(ShowDesc, self).__init__(option_strings, dest, nargs=0, **kwargs)
-
-    def __call__(*args, **kwargs):
-        print 'Automatic syncing of local changes to deployed service'
-        sys.exit(0)
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(
+    parser = utils.juju_arg_parser(
         description='Automatic syncing of local changes to deployed service',
         epilog="""
             This will watch for changes in the local source of a deployed charm
@@ -38,7 +29,6 @@ def parse_args():
         """)
     parser.add_argument('unit')
     parser.add_argument('charm_path', nargs='?')
-    parser.add_argument('-d', '--description', action=ShowDesc, help='show description')
     parser.add_argument('-e', '--environment', dest='env', default=JUJU_ENV,
                         help='juju environment to operate in')
     parser.add_argument('-R', '--no-retry', '--no-restart', dest='retry', action='store_false',
