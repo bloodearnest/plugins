@@ -1,0 +1,147 @@
+#!/usr/bin/env python2
+import argparse
+import os
+import subprocess
+import sys
+
+import jujuclient
+
+import utils
+
+hosts_dir = '/etc/juju-hosts'
+pid_file = '/run/sendsigs.omit.d/network-manager.dnsmasq.pid'
+juju_home = os.environ.get('JUJU_HOME', '~/.juju')
+environments = os.path.join(juju_home, 'environments')
+
+install_script_template = """
+set -ex;
+mkdir -p {hosts_dir};
+chmod 775 {hosts_dir};
+chown :{group} {hosts_dir};
+echo "hostsdir={hosts_dir}" > {dnsmasq_path};
+echo "# Allow members of group {group} to send SIGHUP" > {sudoers_path}
+echo "%{group} ALL = (root) NOPASSWD: /bin/kill -HUP [0-9]*" >> {sudoers_path}
+""".strip()
+
+description = """
+Update local dnsmasq to have records for juju units and machines.
+
+WARNING: this is a devlopment tool and not secure, do not use in production.
+"""
+
+epilog = """
+Notes:
+
+Some setup is required by root, specifically, the specified group will be able
+to:
+
+ a) add additional hosts files in /etc/juju-hosts
+ b) send SIGHUP to any process as root
+
+To install the files:
+
+# check script first
+echo {0} --install-script [--group=foo]
+# then 
+echo {0} --install-script [--group=foo] | sudo bash
+
+Then, add to cron to run regular, e.g every minute:
+
+1 0 * * * {0}
+
+""".format(sys.argv[0])
+
+
+def dns(name):
+    return name.replace('/', '-')
+
+
+def env_file_path(env):
+    return os.path.join(hosts_dir, env)
+
+
+def get_dns_records(env):
+    client = jujuclient.Environment.connect(env)
+    status = client.get_stat()
+
+    for id, machine in status['machines'].items():
+        name = machine['instance-id']  # TODO: only works for local provider
+        if name == 'localhost':
+            continue
+        for address in machine['addresses']:
+            if address['Scope'] == 'local-cloud':
+                yield address['Value'], name
+
+    for svc_name, svc in status['services'].items():
+        if 'units' in svc:
+            for unit_name, unit in svc['units'].items():
+                ip = unit['public-address']
+                # TODO add private address as separate entries
+                if unit_name.endswith('/0'):
+                    yield ip, svc_name
+                yield ip, unit_name
+
+
+def delete_records(env):
+    old_file = env_file_path(env)
+    print('Removing stale env file {}'.format(old_file))
+    os.unlink(old_file)
+
+
+def write_records(env, records):
+    env_file = env_file_path(env)
+    with open(env_file, 'w') as f:
+        print('Writing hosts file for {} env to {}'.format(env, env_file))
+        f.write('# {} juju env\n'.format(env))
+        for ip, name in records:
+            f.write(ip + ' ' + dns(name) + '\n')
+
+
+if __name__ == '__main__':
+
+    parser = utils.juju_arg_parser(
+        description=description,
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('--install-script', action='store_true', 
+                        help='install dnsmasq config and sudoers files. '
+                        'Requires running as root')
+    parser.add_argument('--group', '-g',
+                        help='group to allow to modify dns settings. '
+                        'Defaults to installing user\'s group, '
+                        'used with --install-script')
+    args = parser.parse_args()
+    if args.group is None:
+        import pwd
+        import grp
+        # current user's group
+        args.group = grp.getgrgid(pwd.getpwuid(os.getuid()).pw_gid).gr_name
+
+    if args.install_script:
+        print(install_script_template.format(
+            hosts_dir=hosts_dir,
+            group=args.group,
+            dnsmasq_path='/etc/NetworkManager/dnsmasq.d/juju-local-dns',
+            sudoers_path='/etc/sudoers.d/99-juju-local-dns',
+        ))
+
+    envs = {e.split('.')[0] for e in os.listdir(environments)}
+    old_envs = set(os.listdir(hosts_dir))
+
+    try:
+        for env in old_envs - envs:
+            delete_records(env)
+        for env in envs:
+            records = get_dns_records(env)
+            write_records(env, records)
+
+    except OSError as e:
+        sys.stderr.write('Perhaps you need to use --install-script? '
+                         'See {} --help for more'.format(sys.argv[0]))
+        raise e
+
+    finally:
+        with open(pid_file) as f:
+            pid = f.read().strip()
+        subprocess.check_call(['sudo', '/bin/kill', '-HUP', pid])

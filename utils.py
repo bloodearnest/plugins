@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
+import argparse
 import subprocess
+import sys
 import yaml
 
 
@@ -79,3 +80,27 @@ def print_unit(unit, indent=0, quiet=False, name_width=0, addr_width=0, stat_wid
                          addr_width, unit.public_address,
                          stat_width, unit.agent_state,
                          ', '.join(unit.open_ports))
+
+
+class ShowDesc(argparse.Action):
+    """Argparse action for implementing --description for juju plugins.
+
+    Prints the first line of the description, then exits normally."""
+
+    def __init__(self, option_strings, dest, nargs=None, **kwargs):
+        super(ShowDesc, self).__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, *args, **kwargs):
+        if parser.description.strip():
+            print(parser.description.lstrip().split('\n', 2)[0])
+        sys.exit(0)
+
+
+def juju_arg_parser(*args, **kwargs):
+    parser = argparse.ArgumentParser(*args, **kwargs)
+    parser.add_argument(
+        '-d',
+        '--description',
+        action=ShowDesc,
+        help='Output a short description of the plugin')
+    return parser
