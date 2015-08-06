@@ -75,8 +75,7 @@ if __name__ == '__main__':
     print('adding the following to environments.yaml')
     print(indented)
 
-
-    #with open(env_file, 'a') as f:
-    #    f.write('\n')
-    #    f.write('    # added by juju-add-local-env\n')
-    #    f.write(indented)
+    with open(env_file, 'a') as f:
+        f.write('\n')
+        f.write('    # added by juju-add-local-env\n')
+        f.write(indented)
