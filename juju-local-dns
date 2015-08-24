@@ -2,29 +2,46 @@
 import argparse
 import os
 import subprocess
+import shlex
 import sys
+import getpass
 
 import jujuclient
 
 import utils
 
-hosts_dir = '/etc/juju-hosts'
-pid_file = '/run/sendsigs.omit.d/network-manager.dnsmasq.pid'
-juju_home = os.environ.get('JUJU_HOME', '~/.juju')
+hosts_file = os.path.expanduser('~/.juju-hosts')
+juju_home = os.path.expanduser(os.environ.get('JUJU_HOME', '~/.juju'))
 environments = os.path.join(juju_home, 'environments')
+dbus_cmd = (
+    "dbus-send --system --dest=org.freedesktop.NetworkManager.dnsmasq "
+    "/uk/org/thekelleys/dnsmasq "
+    "org.freedesktop.NetworkManager.dnsmasq.ClearCache"
+)
 
 install_script_template = """
 set -ex;
-mkdir -p {hosts_dir};
-chmod 775 {hosts_dir};
-chown :{group} {hosts_dir};
-echo "hostsdir={hosts_dir}" > {dnsmasq_path};
-echo "# Allow members of group {group} to send SIGHUP" > {sudoers_path}
-echo "%{group} ALL = (root) NOPASSWD: /bin/kill -HUP [0-9]*" >> {sudoers_path}
+# add that file as additional hosts file
+touch {hosts_file}
+echo "addn-hosts={hosts_file}" | sudo tee /etc/NetworkManager/dnsmasq.d/juju-local-dns-{user}.conf
+echo "
+<busconfig>
+    <policy user="{user}">
+        <allow send_destination="org.freedesktop.NetworkManager.dnsmasq"
+               send_interface="org.freedesktop.NetworkManager.dnsmasq"
+               send_member="ClearCache"
+        />
+    </policy>
+</busconfig>
+" | sudo tee /etc/dbus-1/system.d/{user}-dnsmasq.conf
+# create cron
+(crontab -u {user} -l; echo "1 * * * * {name}" ) | crontab -u {user} -
+sudo service dbus reload
+sudo service network-manager restart
 """.strip()
 
 description = """
-Update local dnsmasq to have records for juju units and machines.
+Update local dnsmasq to have records for juju units.
 
 WARNING: this is a devlopment tool and not secure, do not use in production.
 """
@@ -32,69 +49,67 @@ WARNING: this is a devlopment tool and not secure, do not use in production.
 epilog = """
 Notes:
 
-Some setup is required by root, specifically, the specified group will be able
+Some setup is required by root. The specified user will be able
 to:
 
- a) add additional hosts files in /etc/juju-hosts
- b) send SIGHUP to any process as root
+ a) add additional hosts in {1}
+ b) use dbus to clear the system dnsmasq cache
+
+It will also set up a user cron to run every minute to generate up-to-date
+records
 
 To install the files:
 
 # check script first
-echo {0} --install-script [--group=foo]
-# then 
-echo {0} --install-script [--group=foo] | sudo bash
+{0} --install-script [--user=foo]
+# then
+{0} --install-script [--user=foo] | bash
 
-Then, add to cron to run regular, e.g every minute:
 
-1 0 * * * {0}
-
-""".format(sys.argv[0])
+""".format(sys.argv[0], hosts_file)
 
 
 def dns(name):
     return name.replace('/', '-')
 
 
-def env_file_path(env):
-    return os.path.join(hosts_dir, env)
+def get_juju_records(envs):
+    for env in envs:
+        client = jujuclient.Environment.connect(env)
+        status = client.get_stat()
+
+        yield None, env + " juju environment"
+
+        for svc_name, svc in status['services'].items():
+            if 'units' in svc:
+                for unit_name, unit in svc['units'].items():
+                    ip = unit['public-address']
+                    # TODO add private address as separate entries
+                    if unit_name.endswith('/0'):
+                        yield ip, svc_name
+                    yield ip, unit_name
 
 
-def get_dns_records(env):
-    client = jujuclient.Environment.connect(env)
-    status = client.get_stat()
+def get_lxc_records():
+    "Convienience for naked lxc dns, which is hard to do right with lxc-net"
+    dhcp = '/var/lib/misc/dnsmasq.lxcbr0.leases'
+    if not os.path.exists(dhcp):
+        return
 
-    for id, machine in status['machines'].items():
-        name = machine['instance-id']  # TODO: only works for local provider
-        if name == 'localhost':
-            continue
-        for address in machine['addresses']:
-            if address['Scope'] == 'local-cloud':
-                yield address['Value'], name
-
-    for svc_name, svc in status['services'].items():
-        if 'units' in svc:
-            for unit_name, unit in svc['units'].items():
-                ip = unit['public-address']
-                # TODO add private address as separate entries
-                if unit_name.endswith('/0'):
-                    yield ip, svc_name
-                yield ip, unit_name
+    yield None, "lxc dhcp leases"
+    with open('/var/lib/misc/dnsmasq.lxcbr0.leases') as f:
+        for line in f:
+            _, _, ip, name, _ = line.split()
+            yield ip, name
 
 
-def delete_records(env):
-    old_file = env_file_path(env)
-    print('Removing stale env file {}'.format(old_file))
-    os.unlink(old_file)
-
-
-def write_records(env, records):
-    env_file = env_file_path(env)
-    with open(env_file, 'w') as f:
-        print('Writing hosts file for {} env to {}'.format(env, env_file))
-        f.write('# {} juju env\n'.format(env))
+def write_records(records):
+    with open(hosts_file, 'w') as f:
         for ip, name in records:
-            f.write(ip + ' ' + dns(name) + '\n')
+            if ip is None:
+                f.write('# {}\n'.format(name))
+            else:
+                f.write(ip + ' ' + dns(name) + '\n')
 
 
 if __name__ == '__main__':
@@ -104,44 +119,31 @@ if __name__ == '__main__':
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('--install-script', action='store_true', 
-                        help='install dnsmasq config and sudoers files. '
-                        'Requires running as root')
-    parser.add_argument('--group', '-g',
-                        help='group to allow to modify dns settings. '
-                        'Defaults to installing user\'s group, '
+    parser.add_argument('--install-script', action='store_true',
+                        help='output install script')
+    parser.add_argument('--user', '-u', default=getpass.getuser(),
+                        help='user to allow to modify dns settings. '
+                        'Defaults to installing user\'s user, '
                         'used with --install-script')
     args = parser.parse_args()
-    if args.group is None:
-        import pwd
-        import grp
-        # current user's group
-        args.group = grp.getgrgid(pwd.getpwuid(os.getuid()).pw_gid).gr_name
 
     if args.install_script:
         print(install_script_template.format(
-            hosts_dir=hosts_dir,
-            group=args.group,
-            dnsmasq_path='/etc/NetworkManager/dnsmasq.d/juju-local-dns',
-            sudoers_path='/etc/sudoers.d/99-juju-local-dns',
+            hosts_file=hosts_file,
+            user=args.user,
+            name=sys.argv[0],
         ))
+        sys.exit(0)
 
     envs = {e.split('.')[0] for e in os.listdir(environments)}
-    old_envs = set(os.listdir(hosts_dir))
-
     try:
-        for env in old_envs - envs:
-            delete_records(env)
-        for env in envs:
-            records = get_dns_records(env)
-            write_records(env, records)
-
+        records = list(get_juju_records(envs))
+        records.extend(get_lxc_records())
+        write_records(records)
     except OSError as e:
         sys.stderr.write('Perhaps you need to use --install-script? '
                          'See {} --help for more'.format(sys.argv[0]))
         raise e
 
-    finally:
-        with open(pid_file) as f:
-            pid = f.read().strip()
-        subprocess.check_call(['sudo', '/bin/kill', '-HUP', pid])
+    else:
+        subprocess.check_call(shlex.split(dbus_cmd))
