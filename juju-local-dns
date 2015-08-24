@@ -138,7 +138,7 @@ if __name__ == '__main__':
     envs = {e.split('.')[0] for e in os.listdir(environments)}
     try:
         records = list(get_juju_records(envs))
-        records.extend(get_lxc_records())
+        #records.extend(get_lxc_records())
         write_records(records)
     except OSError as e:
         sys.stderr.write('Perhaps you need to use --install-script? '
