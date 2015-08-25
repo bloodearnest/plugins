@@ -5,6 +5,7 @@ import subprocess
 import shlex
 import sys
 import getpass
+from collections import Counter
 
 import jujuclient
 
@@ -24,7 +25,7 @@ set -ex;
 # add that file as additional hosts file
 touch {hosts_file}
 echo "addn-hosts={hosts_file}" | sudo tee /etc/NetworkManager/dnsmasq.d/juju-local-dns-{user}.conf
-echo "
+echo '
 <busconfig>
     <policy user="{user}">
         <allow send_destination="org.freedesktop.NetworkManager.dnsmasq"
@@ -33,7 +34,7 @@ echo "
         />
     </policy>
 </busconfig>
-" | sudo tee /etc/dbus-1/system.d/{user}-dnsmasq.conf
+' | sudo tee /etc/dbus-1/system.d/{user}-dnsmasq.conf
 # create cron
 (crontab -u {user} -l; echo "1 * * * * {name}" ) | crontab -u {user} -
 sudo service dbus reload
@@ -69,16 +70,12 @@ To install the files:
 """.format(sys.argv[0], hosts_file)
 
 
-def dns(name):
-    return name.replace('/', '-')
-
-
 def get_juju_records(envs):
     for env in envs:
         client = jujuclient.Environment.connect(env)
         status = client.get_stat()
 
-        yield None, env + " juju environment"
+        yield env + " juju environment", None, env
 
         for svc_name, svc in status['services'].items():
             if 'units' in svc:
@@ -86,30 +83,30 @@ def get_juju_records(envs):
                     ip = unit['public-address']
                     # TODO add private address as separate entries
                     if unit_name.endswith('/0'):
-                        yield ip, svc_name
-                    yield ip, unit_name
+                        yield svc_name, ip, env
+                    yield unit_name, ip, env
 
 
-def get_lxc_records():
-    "Convienience for naked lxc dns, which is hard to do right with lxc-net"
-    dhcp = '/var/lib/misc/dnsmasq.lxcbr0.leases'
-    if not os.path.exists(dhcp):
-        return
-
-    yield None, "lxc dhcp leases"
-    with open('/var/lib/misc/dnsmasq.lxcbr0.leases') as f:
-        for line in f:
-            _, _, ip, name, _ = line.split()
-            yield ip, name
+def add_shortcuts(records):
+    "Add records w/o juju env if the service name is unambiguous"
+    counts = Counter((r[0], r[1]) for r in records if r[1] is not None)
+    uniques = (k for k, v in counts.items() if v == 1)
+    records.append(('short cuts for unambigious units', None, None))
+    for name, ip in uniques:
+        records.append((name, ip, None))
 
 
 def write_records(records):
     with open(hosts_file, 'w') as f:
-        for ip, name in records:
+        for name, ip, env in records:
             if ip is None:
                 f.write('# {}\n'.format(name))
             else:
-                f.write(ip + ' ' + dns(name) + '\n')
+                safe_name = name.replace('/', '-')
+                if env is None:
+                    f.write("{} {}.juju\n".format(ip, safe_name))
+                else:
+                    f.write("{} {}.{}.juju\n".format(ip, safe_name, env))
 
 
 if __name__ == '__main__':
@@ -138,7 +135,7 @@ if __name__ == '__main__':
     envs = {e.split('.')[0] for e in os.listdir(environments)}
     try:
         records = list(get_juju_records(envs))
-        #records.extend(get_lxc_records())
+        add_shortcuts(records)
         write_records(records)
     except OSError as e:
         sys.stderr.write('Perhaps you need to use --install-script? '
